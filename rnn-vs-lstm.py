@@ -29,6 +29,40 @@ def clean_df(df):
     )
 
 
+def plot_predictions(
+    all_y, rnn_preds, lstm_preds, dummy_preds, rnn_loss, lstm_loss, dummy_loss
+):
+    x_axis = range(len(all_y))
+
+    plt.figure(figsize=(4, 8))
+    plt.plot(x_axis, all_y, label="True", linestyle="-", color="black")
+    plt.plot(
+        x_axis,
+        dummy_preds,
+        label=f"Dummy prediction, loss {dummy_loss: .4f}",
+        linestyle="--",
+        color="red",
+    )
+    plt.plot(
+        x_axis,
+        rnn_preds,
+        label=f"RNN prediction, loss {rnn_loss: .4f}",
+        linestyle="--",
+        color="blue",
+    )
+    plt.plot(
+        x_axis,
+        lstm_preds,
+        label=f"LSTM prediction, loss {lstm_loss: .4f}",
+        linestyle="--",
+        color="green",
+    )
+
+    plt.title("Prediction Result")
+    plt.legend()
+    plt.show()
+
+
 def create_timeseries_dataset(dataset, look_back=1):
     """
     Creates a dataset for time series prediction with a specified look_back window.
@@ -134,19 +168,57 @@ class RNN(nn.Module):
         return output
 
 
+class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers):
+        super(LSTM, self).__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+        )
+        self.linear = nn.Linear(in_features=hidden_size, out_features=output_size)
+
+    def forward(self, x):
+        output, _ = self.lstm(x)
+        output = output[:, -1, :]  # Last step output
+        output = self.linear(output)
+        return output
+
+
 # --- Training setup ---
 
-# Initialize the model
-input_size = 1  # Number of features
-output_size = 1
-hidden_size = 128
-num_layers = 2
-rnn = RNN(input_size, hidden_size, output_size, num_layers)
 
-criterion = nn.MSELoss()
-lr = 5e-5
-optimizer = optim.Adam(rnn.parameters(), lr=lr)
-scheduler = ReduceLROnPlateau(optimizer, patience=0, factor=0.5)
+# Initialize the model
+# Define common parameters for both RNN and LSTM models
+common_params = {
+    "input_size": 1,  # Number of features
+    "output_size": 1,
+    "hidden_size": 128,
+    "num_layers": 2,
+    "lr": 5e-5,
+}
+# Initialize the RNN model and related components
+rnn = RNN(
+    common_params["input_size"],
+    common_params["hidden_size"],
+    common_params["output_size"],
+    common_params["num_layers"],
+)
+rnn_criterion = nn.MSELoss()
+rnn_optimizer = optim.Adam(rnn.parameters(), lr=common_params["lr"])
+rnn_scheduler = ReduceLROnPlateau(rnn_optimizer, patience=0, factor=0.5)
+
+# Initialize the LSTM model and related components
+lstm = LSTM(
+    common_params["input_size"],
+    common_params["hidden_size"],
+    common_params["output_size"],
+    common_params["num_layers"],
+)
+lstm_criterion = nn.MSELoss()
+lstm_optimizer = optim.Adam(lstm.parameters(), lr=common_params["lr"])
+lstm_scheduler = ReduceLROnPlateau(lstm_optimizer, patience=0, factor=0.5)
 
 
 # --- Training, validaton and test function ---
@@ -229,7 +301,58 @@ def test_one_epoch(model, loss_fn, dataloader):
     return total_loss / len(dataloader), all_x, all_y, all_preds
 
 
+def train_and_validate(
+    model,
+    optimizer,
+    criterion,
+    scheduler,
+    train_loader,
+    val_loader,
+    epochs,
+    print_step,
+    patience,
+):
+    train_losses = []
+    val_losses = []
+    last_loss = float("inf")  # Initialize last_loss to infinity
+    counter = 0  # Initialize early stopping counter
+
+    for epoch in range(epochs):
+        # Training
+        train_loss = train_one_epoch(model, optimizer, criterion, train_loader)
+        train_losses.append(train_loss)
+
+        # Validation
+        val_loss = val_one_epoch(model, optimizer, criterion, val_loader)
+        val_losses.append(val_loss)
+
+        # Print score
+        if (epoch == 0) or ((epoch + 1) % print_step == 0):
+            avg_train_loss = np.mean(train_loss)
+            avg_val_loss = np.mean(val_loss)
+            print(
+                f"    Epoch {epoch+1: <3}/{epochs} | train loss = {avg_train_loss: .8f} | val loss = {avg_val_loss: .8f}"
+            )
+
+        # Lr scheduler
+        scheduler.step(val_loss)
+
+        # Early stopping
+        if val_loss < last_loss:
+            last_loss = val_loss
+            counter = 0
+        else:
+            counter += 1
+            last_loss = val_loss
+            if counter >= patience:
+                print("    Early stopping triggered")
+                break
+
+    return train_losses, val_losses
+
+
 # --- Training argument ---
+
 
 if debug:
     epochs = 1
@@ -245,38 +368,34 @@ last_loss = float("inf")
 patience = 3  # Number of epochs to wait for improvement
 counter = 0
 
+
 # --- Training loop ---
 
-for epoch in range(epochs):
-    # Training
-    train_loss = train_one_epoch(rnn, optimizer, criterion, train_loader)
-    train_losses.append(train_loss)
 
-    # Validation
-    val_loss = val_one_epoch(rnn, optimizer, criterion, val_loader)
-    val_losses.append(val_loss)
-    # Print score
-    if (epoch == 0) or ((epoch + 1) % print_step == 0):
-        # print train and validation result
-        avg_train_loss = np.mean(train_loss)
-        avg_val_loss = np.mean(val_loss)
-        print(
-            f"    Epoch {epoch+1: <3}/{epochs} | train loss = {avg_train_loss: .8f} | val loss = {avg_val_loss: .8f}"
-        )
+rnn_train_losses, rnn_val_losses = train_and_validate(
+    model=rnn,
+    optimizer=rnn_optimizer,
+    criterion=rnn_criterion,
+    scheduler=rnn_scheduler,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    epochs=epochs,
+    print_step=print_step,
+    patience=patience,
+)
 
-    # Lr scheduler
-    scheduler.step(val_loss)
+lstm_train_losses, lstm_val_losses = train_and_validate(
+    model=lstm,
+    optimizer=lstm_optimizer,
+    criterion=lstm_criterion,
+    scheduler=lstm_scheduler,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    epochs=epochs,
+    print_step=print_step,
+    patience=patience,
+)
 
-    # Early stopping
-    if val_loss < last_loss:
-        last_loss = val_loss
-        counter = 0
-    else:
-        counter += 1
-        last_loss = val_loss
-        if counter >= patience:
-            print("    Early stopping triggered")
-            break
 
 # --- Testing ---
 
@@ -284,32 +403,20 @@ print("Testing...")
 
 # RNN
 rnn_loss, all_x, all_y, rnn_preds = test_one_epoch(
-    rnn, loss_fn=criterion, dataloader=test_loader
+    rnn, loss_fn=rnn_criterion, dataloader=test_loader
+)
+
+# LSTM
+lstm_loss, _, _, lstm_preds = test_one_epoch(
+    lstm, loss_fn=lstm_criterion, dataloader=test_loader
 )
 
 # Last timestep prediction
 dummy_preds = all_x[:, -1, 0].unsqueeze(-1)
-dummy_loss = criterion(all_y, dummy_preds).item()
+dummy_loss = rnn_criterion(all_y, dummy_preds).item()
 
 # --- Plotting --
 
-x_axis = range(len(all_y))
-plt.figure(figsize=(4, 8))
-plt.plot(x_axis, all_y, label="True", linestyle="-", color="black")
-plt.plot(
-    x_axis,
-    dummy_preds,
-    label=f"Dummy prediction, loss {dummy_loss: .4f}",
-    linestyle="--",
-    color="red",
+plot_predictions(
+    all_y, rnn_preds, lstm_preds, dummy_preds, rnn_loss, lstm_loss, dummy_loss
 )
-plt.plot(
-    x_axis,
-    rnn_preds,
-    label=f"RNN prediction, loss {rnn_loss: .4f}",
-    linestyle="--",
-    color="blue",
-)
-plt.title("Prediction Result")
-plt.legend()
-plt.show()
