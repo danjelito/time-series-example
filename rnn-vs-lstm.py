@@ -11,7 +11,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 sns.set_style("whitegrid")
 
-debug = True
+debug = False
 
 
 def clean_df(df):
@@ -234,7 +234,8 @@ def test_one_epoch(model, loss_fn, dataloader):
 if debug:
     epochs = 1
 else:
-    epochs = 20
+    epochs = 100
+
 print_step = 1
 train_losses = []
 val_losses = []
@@ -278,17 +279,34 @@ for epoch in range(epochs):
             break
 
 # --- Testing ---
+
 print("Testing...")
-loss, all_x, all_y, all_preds = test_one_epoch(
+
+# RNN
+rnn_loss, all_x, all_y, rnn_preds = test_one_epoch(
     rnn, loss_fn=criterion, dataloader=test_loader
 )
+
+# Last timestep prediction
+dummy_preds = all_x[:, -1, 0].unsqueeze(-1)
+dummy_loss = criterion(all_y, dummy_preds).item()
+
+# --- Plotting --
+
 x_axis = range(len(all_y))
 plt.figure(figsize=(4, 8))
 plt.plot(x_axis, all_y, label="True", linestyle="-", color="black")
 plt.plot(
     x_axis,
-    all_preds,
-    label=f"RNN Prediction, loss {loss: .4f}",
+    dummy_preds,
+    label=f"Dummy prediction, loss {dummy_loss: .4f}",
+    linestyle="--",
+    color="red",
+)
+plt.plot(
+    x_axis,
+    rnn_preds,
+    label=f"RNN prediction, loss {rnn_loss: .4f}",
     linestyle="--",
     color="blue",
 )
