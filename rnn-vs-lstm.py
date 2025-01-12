@@ -1,13 +1,13 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 sns.set_style("whitegrid")
 
@@ -30,7 +30,15 @@ def clean_df(df):
 
 
 def plot_predictions(
-    all_y, rnn_preds, lstm_preds, dummy_preds, rnn_loss, lstm_loss, dummy_loss
+    all_y,
+    rnn_preds,
+    lstm_preds,
+    gru_preds,
+    dummy_preds,
+    rnn_loss,
+    lstm_loss,
+    gru_loss,
+    dummy_loss,
 ):
     x_axis = range(len(all_y))
 
@@ -57,6 +65,13 @@ def plot_predictions(
         linestyle="--",
         color="green",
     )
+    plt.plot(
+        x_axis,
+        gru_preds,
+        label=f"GRU prediction, loss {gru_loss: .4f}",
+        linestyle="--",
+        color="yellow",
+    )
 
     plt.title("Prediction Result")
     plt.legend()
@@ -82,6 +97,9 @@ def create_timeseries_dataset(dataset, look_back=1):
         xs.append(a)
         ys.append(dataset[i + look_back])
     return np.array(xs), np.array(ys)
+
+
+# --- Data preparation ---
 
 
 # Read DF
@@ -128,7 +146,7 @@ class TimeseriesDataset(Dataset):
         return x, y
 
 
-batch_size = 2
+batch_size = 8
 train_dataset = TimeseriesDataset(x_train_dataset, y_train)
 val_dataset = TimeseriesDataset(x_val_dataset, y_val)
 test_dataset = TimeseriesDataset(x_test_dataset, y_test)
@@ -147,6 +165,9 @@ if debug:
         print("    Inputs:", inputs)
         print("    Targets:", targets)
         break
+
+
+# --- Model preparation ---
 
 
 # Create model
@@ -186,39 +207,59 @@ class LSTM(nn.Module):
         return output
 
 
+class GRU(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers):
+        super(GRU, self).__init__()
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+        )
+        self.linear = nn.Linear(in_features=hidden_size, out_features=output_size)
+
+    def forward(self, x):
+        output, _ = self.gru(x)
+        output = output[:, -1, :]  # Last step output
+        output = self.linear(output)
+        return output
+
+
 # --- Training setup ---
 
 
-# Initialize the model
-# Define common parameters for both RNN and LSTM models
-common_params = {
-    "input_size": 1,  # Number of features
-    "output_size": 1,
-    "hidden_size": 128,
-    "num_layers": 2,
-    "lr": 5e-5,
-}
 # Initialize the RNN model and related components
 rnn = RNN(
-    common_params["input_size"],
-    common_params["hidden_size"],
-    common_params["output_size"],
-    common_params["num_layers"],
+    input_size=1,
+    hidden_size=128,
+    output_size=1,
+    num_layers=2,
 )
 rnn_criterion = nn.MSELoss()
-rnn_optimizer = optim.Adam(rnn.parameters(), lr=common_params["lr"])
-rnn_scheduler = ReduceLROnPlateau(rnn_optimizer, patience=0, factor=0.5)
+rnn_optimizer = optim.Adam(rnn.parameters(), lr=2e-5)
+rnn_scheduler = ReduceLROnPlateau(rnn_optimizer, patience=1, factor=0.5)
 
 # Initialize the LSTM model and related components
 lstm = LSTM(
-    common_params["input_size"],
-    common_params["hidden_size"],
-    common_params["output_size"],
-    common_params["num_layers"],
+    input_size=1,
+    hidden_size=128,
+    output_size=1,
+    num_layers=2,
 )
 lstm_criterion = nn.MSELoss()
-lstm_optimizer = optim.Adam(lstm.parameters(), lr=common_params["lr"])
-lstm_scheduler = ReduceLROnPlateau(lstm_optimizer, patience=0, factor=0.5)
+lstm_optimizer = optim.Adam(lstm.parameters(), lr=5e-5)
+lstm_scheduler = ReduceLROnPlateau(lstm_optimizer, patience=1, factor=0.5)
+
+# Initialize the GRU model and related components
+gru = GRU(
+    input_size=1,
+    hidden_size=128,
+    output_size=1,
+    num_layers=2,
+)
+gru_criterion = nn.MSELoss()
+gru_optimizer = optim.Adam(gru.parameters(), lr=5e-5)
+gru_scheduler = ReduceLROnPlateau(gru_optimizer, patience=1, factor=0.5)
 
 
 # --- Training, validaton and test function ---
@@ -362,16 +403,13 @@ else:
 print_step = 1
 train_losses = []
 val_losses = []
-print("Training...")
-
-last_loss = float("inf")
 patience = 3  # Number of epochs to wait for improvement
-counter = 0
 
 
 # --- Training loop ---
 
 
+print("Training...")
 rnn_train_losses, rnn_val_losses = train_and_validate(
     model=rnn,
     optimizer=rnn_optimizer,
@@ -395,9 +433,21 @@ lstm_train_losses, lstm_val_losses = train_and_validate(
     print_step=print_step,
     patience=patience,
 )
+gru_train_losses, gru_val_losses = train_and_validate(
+    model=gru,
+    optimizer=gru_optimizer,
+    criterion=gru_criterion,
+    scheduler=gru_scheduler,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    epochs=epochs,
+    print_step=print_step,
+    patience=patience,
+)
 
 
 # --- Testing ---
+
 
 print("Testing...")
 
@@ -410,13 +460,27 @@ rnn_loss, all_x, all_y, rnn_preds = test_one_epoch(
 lstm_loss, _, _, lstm_preds = test_one_epoch(
     lstm, loss_fn=lstm_criterion, dataloader=test_loader
 )
+# GRU
+gru_loss, _, _, gru_preds = test_one_epoch(
+    gru, loss_fn=gru_criterion, dataloader=test_loader
+)
 
 # Last timestep prediction
 dummy_preds = all_x[:, -1, 0].unsqueeze(-1)
 dummy_loss = rnn_criterion(all_y, dummy_preds).item()
 
-# --- Plotting --
+
+# --- Plotting ---
+
 
 plot_predictions(
-    all_y, rnn_preds, lstm_preds, dummy_preds, rnn_loss, lstm_loss, dummy_loss
+    all_y,
+    rnn_preds,
+    lstm_preds,
+    gru_preds,
+    dummy_preds,
+    rnn_loss,
+    lstm_loss,
+    gru_loss,
+    dummy_loss,
 )
